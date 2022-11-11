@@ -1,11 +1,9 @@
 using System;
-using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Data;
+using System.Collections.Generic;
+using System.Linq;
 
 #nullable enable
 
@@ -14,69 +12,62 @@ public static class Your
     public static string ConnectionString = @"Server=(localdb)\mssqllocaldb;Database=Issue29502;Trusted_Connection=True;MultipleActiveResultSets=true;Connect Timeout=30";
 }
 
-public class Program
+public class User
 {
-    public static void Main(string[] args)
-    {
-        CreateHostBuilder(args).Build().Run();
-    }
-
-    public static IHostBuilder CreateHostBuilder(string[] args) =>
-    Host.CreateDefaultBuilder(args)
-        .ConfigureServices((hostContext, services) =>
-        {
-            services.AddTransient<Processor>();
-            services.AddHostedService<Worker>();
-            services.AddPooledDbContextFactory<ApplicationDbContext>(options =>
-            {
-                options
-                    .UseSqlServer(Your.ConnectionString)
-                    .EnableSensitiveDataLogging();
-            });
-        });
+    public string Id { get; set; } = null!;
+    public DateTime TimeCreatedUtc { get; set; }
+    public ICollection<DailyDigest> DailyDigests { get; set; } = null!;
 }
 
-public class Worker : IHostedService
+public class DailyDigest
 {
-    private readonly ILogger _logger;
-    private readonly IHostApplicationLifetime _appLifetime;
-    private readonly Processor _processor;
+    public int Id { get; set; }
+    public User? User { get; set; }
+}
 
-    public Worker(ILogger<Worker> logger, IHostApplicationLifetime appLifetime, Processor processor)
-    {
-        _logger = logger;
-        _appLifetime = appLifetime;
-        _processor = processor;
-    }
+public class SomeDbContext : DbContext
+{
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+        => optionsBuilder
+            .UseSqlServer(Your.ConnectionString)
+            .LogTo(Console.WriteLine, LogLevel.Trace)
+            .EnableSensitiveDataLogging();
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    public DbSet<User> Users => Set<User>();
+    public DbSet<DailyDigest> DailyDigests => Set<DailyDigest>();
+}
+
+public class Program
+{
+    public static async Task Main()
     {
-        _appLifetime.ApplicationStarted.Register(() =>
+        using (var context = new SomeDbContext())
         {
-            Task.Run(async () =>
+            if (!await context.Database.CanConnectAsync() || !await context.Users.AnyAsync())
             {
-                try
-                {
-                    _logger.LogInformation("Process starting");
-                    await _processor.Process(_appLifetime.ApplicationStopping);
-                    _logger.LogInformation("Process done");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Unhandled exception!");
-                }
-                finally
-                {
-                    _appLifetime.StopApplication();
-                }
-            });
-        });
+                throw new ApplicationException("Run database.sql script first!");
+            }
+        }
 
-        return Task.CompletedTask;
-    }
+        using (var context = new SomeDbContext())
+        {
+            var maxCount = 23;
 
-    public Task StopAsync(CancellationToken cancellationToken)
-    {
-        return Task.CompletedTask;
+            var digests = await context.Users
+                .OrderBy(u => u.TimeCreatedUtc)
+                .Take(maxCount)
+                .Select(u => new DailyDigest
+                {
+                    User = u,
+                })
+                .ToListAsync();
+
+            foreach (var digest in digests)
+            {
+                context.DailyDigests.Add(digest);
+            }
+
+            await context.SaveChangesAsync();
+        }
     }
 }
